@@ -39,9 +39,9 @@ def _decode_frame(frame_data: str) -> np.ndarray:
         "frames to the /verify endpoint."
     ),
 )
-def create_liveness_challenge():
+def create_liveness_challenge(body: dict | None = None):
     """Issue a new randomized liveness challenge."""
-    challenge = create_challenge()
+    challenge = create_challenge(group_mode=bool((body or {}).get("group_mode", False)))
     return LivenessChallenge(**challenge)
 
 

@@ -14,13 +14,14 @@ from datetime import datetime
 
 from models.database import (
     Teacher, Student, Subject, SubjectStudent,
-    AttendanceRecord, AttendanceSession, ManualReview, get_db,
+    AttendanceRecord, AttendanceSession, get_db,
 )
 from models.schemas import (
     DashboardStats, SubjectCreateRequest, SubjectResponse,
     AttendanceRecordResponse, StudentResponse, SuccessResponse,
+    AdminStudentPasswordResetRequest, AdminClearDataRequest,
 )
-from services.auth import get_current_teacher
+from services.auth import get_current_teacher, hash_password, verify_password
 
 router = APIRouter(prefix="/api/admin", tags=["Admin Dashboard"])
 
@@ -46,6 +47,7 @@ def get_student_information(
             student_code=student.student_code,
             name=student.name,
             email=student.email,
+            mobile_number=getattr(student, 'mobile_number', None),
             department=student.department,
             year=student.year,
             has_face_embedding=student.face_embedding is not None,
@@ -55,6 +57,56 @@ def get_student_information(
         )
         for student in students
     ]
+
+
+@router.put(
+    "/students/{student_id}/password",
+    response_model=SuccessResponse,
+    summary="Set a student's password",
+)
+def reset_student_password(
+    student_id: int,
+    req: AdminStudentPasswordResetRequest,
+    teacher: Teacher = Depends(get_current_teacher),
+    db: Session = Depends(get_db),
+):
+    """Set a new password for a student from the authenticated admin dashboard."""
+    student = db.query(Student).filter(Student.student_id == student_id).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found.")
+    if not student.is_active:
+        raise HTTPException(status_code=400, detail="Deregistered student accounts cannot sign in.")
+
+    student.password_hash = hash_password(req.password)
+    db.commit()
+    return SuccessResponse(message="Student password updated. Share the new password with the student securely.")
+
+
+@router.delete(
+    "/data",
+    response_model=SuccessResponse,
+    summary="Clear student, class, session, and attendance data",
+)
+def clear_application_data(
+    req: AdminClearDataRequest,
+    teacher: Teacher = Depends(get_current_teacher),
+    db: Session = Depends(get_db),
+):
+    """Delete operational data only after password and typed-phrase confirmation."""
+    if not verify_password(req.password, teacher.password_hash):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Administrator password is incorrect.")
+    if req.confirmation.strip() != "DELETE ALL DATA":
+        raise HTTPException(status_code=400, detail="Type DELETE ALL DATA exactly to confirm.")
+
+    # Delete children before parents to satisfy the database foreign keys.
+    db.query(AttendanceRecord).delete(synchronize_session=False)
+    db.query(AttendanceSession).delete(synchronize_session=False)
+    db.query(SubjectStudent).delete(synchronize_session=False)
+    db.query(Subject).delete(synchronize_session=False)
+    db.query(Student).delete(synchronize_session=False)
+    db.commit()
+
+    return SuccessResponse(message="Student, class, session, and attendance data cleared. Administrator accounts were kept.")
 
 
 @router.get(
@@ -96,12 +148,7 @@ def get_dashboard_stats(
     ).count()
     absent_today = max(0, enrolled_students_with_face - present_today)
 
-    pending_reviews = db.query(ManualReview).join(
-        AttendanceRecord, ManualReview.attendance_id == AttendanceRecord.attendance_id
-    ).filter(
-        ManualReview.status == "PENDING",
-        AttendanceRecord.subject_id.in_(teacher_subject_ids),
-    ).count()
+    pending_reviews = 0  # Simplified: manual review queue removed
 
     total_sessions = db.query(AttendanceSession).filter(
         AttendanceSession.created_by == teacher.teacher_id
@@ -202,7 +249,7 @@ def get_attendance_report(
     teacher: Teacher = Depends(get_current_teacher),
     db: Session = Depends(get_db),
 ):
-    """Get attendance records for admin dashboard with filtering."""
+    """Get attendance records, deriving absences for enrolled students after a session ends."""
     # Only show records for teacher's subjects
     teacher_subject_ids = [
         s.subject_id for s in
@@ -252,4 +299,124 @@ def get_attendance_report(
             review_status=r.review_status,
         ))
 
+    # For the Absent filter, also show enrolled students with no attendance
+    # attempt in a completed session. Do not synthesize absences for sessions
+    # that are still in progress or scheduled for later.
+    if status_filter and status_filter.upper() == "ABSENT":
+        completed_sessions_query = db.query(AttendanceSession).filter(
+            AttendanceSession.subject_id.in_(teacher_subject_ids),
+            AttendanceSession.is_deleted.is_(False),
+            AttendanceSession.end_time <= datetime.now(),
+        )
+        if subject_id:
+            completed_sessions_query = completed_sessions_query.filter(
+                AttendanceSession.subject_id == subject_id
+            )
+        if session_id:
+            completed_sessions_query = completed_sessions_query.filter(
+                AttendanceSession.session_id == session_id
+            )
+        if date:
+            completed_sessions_query = completed_sessions_query.filter(
+                AttendanceSession.date == date
+            )
+
+        completed_sessions = completed_sessions_query.order_by(
+            AttendanceSession.end_time.desc()
+        ).all()
+        subject_names = {
+            subject.subject_id: subject.name
+            for subject in db.query(Subject).filter(
+                Subject.subject_id.in_({session.subject_id for session in completed_sessions})
+            ).all()
+        } if completed_sessions else {}
+        session_ids = [session.session_id for session in completed_sessions]
+        recorded_pairs = set()
+        if session_ids:
+            recorded_pairs = {
+                (record.session_id, record.student_id)
+                for record in db.query(AttendanceRecord).filter(
+                    AttendanceRecord.session_id.in_(session_ids)
+                ).all()
+            }
+
+        for session in completed_sessions:
+            enrollments = db.query(SubjectStudent).filter(
+                SubjectStudent.subject_id == session.subject_id
+            ).all()
+            enrolled_ids = [enrollment.student_id for enrollment in enrollments]
+            if not enrolled_ids:
+                continue
+
+            enrolled_students = db.query(Student).filter(
+                Student.student_id.in_(enrolled_ids),
+                Student.is_active.is_(True),
+            ).all()
+            for student in enrolled_students:
+                if (session.session_id, student.student_id) in recorded_pairs:
+                    continue
+                if student_name and student_name.lower() not in student.name.lower():
+                    continue
+
+                results.append(AttendanceRecordResponse(
+                    attendance_id=None,
+                    student_id=student.student_id,
+                    student_code=student.student_code,
+                    student_name=student.name,
+                    subject_id=session.subject_id,
+                    subject_name=subject_names.get(session.subject_id),
+                    session_id=session.session_id,
+                    date=session.date,
+                    timestamp=session.end_time,
+                    recognition_confidence=None,
+                    liveness_score=None,
+                    liveness_status="NOT_CHECKED",
+                    status="ABSENT",
+                    verification_method="AUTO_ABSENT",
+                    review_status="APPROVED",
+                    is_derived_absence=True,
+                ))
+
+    results.sort(key=lambda record: record.timestamp, reverse=True)
+    results = results[:max(1, min(limit, 500))]
+
     return results
+
+
+@router.put(
+    "/attendance/{attendance_id}/status",
+    response_model=SuccessResponse,
+    summary="Manually update attendance status (Present/Absent)",
+)
+def update_attendance_status(
+    attendance_id: int,
+    new_status: str,
+    teacher: Teacher = Depends(get_current_teacher),
+    db: Session = Depends(get_db),
+):
+    """Allow teachers to manually change an attendance record between PRESENT and ABSENT."""
+    allowed = {"PRESENT", "ABSENT"}
+    status_upper = new_status.strip().upper()
+    if status_upper not in allowed:
+        raise HTTPException(status_code=400, detail=f"Status must be one of: {', '.join(allowed)}")
+
+    record = db.query(AttendanceRecord).filter(
+        AttendanceRecord.attendance_id == attendance_id,
+    ).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Attendance record not found.")
+
+    # Only allow editing records for teacher's subjects
+    teacher_subject_ids = [
+        s.subject_id for s in
+        db.query(Subject).filter(Subject.teacher_id == teacher.teacher_id).all()
+    ]
+    if record.subject_id not in teacher_subject_ids:
+        raise HTTPException(status_code=403, detail="You can only edit records for your own subjects.")
+
+    record.status = status_upper
+    record.verification_method = "ADMIN_OVERRIDE"
+    record.review_status = "APPROVED"
+    db.commit()
+
+    return SuccessResponse(message=f"Attendance updated to {status_upper}.")

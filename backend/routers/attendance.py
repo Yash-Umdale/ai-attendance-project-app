@@ -10,13 +10,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from datetime import datetime
-import numpy as np
-import base64
-import cv2
 import logging
 
+
 from models.database import (
-    AttendanceRecord, AttendanceSession, ManualReview,
+    AttendanceRecord, AttendanceSession,
     Student, Subject, get_db,
 )
 from models.schemas import (
@@ -25,7 +23,7 @@ from models.schemas import (
 )
 from services.face_detection import detect_faces, get_face_landmarks, compute_face_embedding
 from services.face_recognition_service import recognize_face
-from services.liveness import check_passive_liveness
+from services.liveness import consume_successful_challenge
 from services.attendance_decision import AttendanceDecisionInput, make_attendance_decision
 
 logger = logging.getLogger(__name__)
@@ -33,16 +31,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/attendance", tags=["Attendance"])
 
 
-def _decode_frame(frame_data: str) -> np.ndarray:
-    """Decode base64 image to numpy RGB array."""
-    if "," in frame_data:
-        frame_data = frame_data.split(",", 1)[1]
-    img_bytes = base64.b64decode(frame_data)
-    nparr = np.frombuffer(img_bytes, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    if img is None:
-        raise ValueError("Failed to decode image")
-    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+from utils import decode_frame as _decode_frame
 
 
 @router.post(
@@ -76,10 +65,13 @@ def mark_attendance(req: AttendanceRequest, db: Session = Depends(get_db)):
     # Step 1: Face Detection
     detection = detect_faces(image_np)
 
-    # Step 2: Liveness (passive check on the frame)
-    liveness_result = {"liveness": "NOT_CHECKED", "score": 0.0}
-    if detection["status"] == "ONE_FACE":
-        liveness_result = check_passive_liveness(image_np)
+    # Step 2: Require a completed randomized camera challenge. A single still
+    # frame and texture heuristics cannot establish that a person is live.
+    liveness_passed = consume_successful_challenge(req.liveness_challenge_id)
+    liveness_result = {
+        "liveness": "PASS" if liveness_passed else "FAIL",
+        "score": 1.0 if liveness_passed else 0.0,
+    }
 
     # Step 3: Recognition (only if one face detected)
     recognition_result = {
@@ -152,21 +144,99 @@ def mark_attendance(req: AttendanceRequest, db: Session = Depends(get_db)):
 
         decision["attendance_id"] = record.attendance_id
 
-        # Step 6: Create manual review entry if borderline
-        if decision["decision"] == "MANUAL_REVIEW":
-            review = ManualReview(
-                attendance_id=record.attendance_id,
-                student_id=decision["student_id"],
-                session_id=req.session_id,
-                recognition_confidence=decision["recognition_confidence"],
-                liveness_status=decision["liveness_status"],
-                liveness_score=decision["liveness_score"],
-                status="PENDING",
-            )
-            db.add(review)
-            db.commit()
-
     return AttendanceDecision(**decision)
+
+
+@router.post(
+    "/mark-group",
+    summary="Mark attendance for several students in one camera capture",
+)
+def mark_group_attendance(req: AttendanceRequest, db: Session = Depends(get_db)):
+    """Verify a group challenge, then recognize and record each visible face."""
+    try:
+        image_np = _decode_frame(req.frame_data)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid image data.")
+
+    detection = detect_faces(image_np)
+    faces = detection.get("faces", [])
+    if not faces:
+        return {
+            "decision": "REJECTED", "reason": detection["message"],
+            "liveness_status": "UNVERIFIED", "liveness_score": 0.0,
+            "face_count": 0, "students": [],
+        }
+
+    if len(faces) > 8:
+        return {
+            "decision": "REJECTED", "reason": "Group attendance supports up to 8 faces at a time.",
+            "liveness_status": "UNVERIFIED", "liveness_score": 0.0,
+            "face_count": len(faces), "students": [],
+        }
+
+    if not consume_successful_challenge(req.liveness_challenge_id, expected_face_count=len(faces)):
+        return {
+            "decision": "REJECTED", "reason": "All visible students must complete the live camera challenge.",
+            "liveness_status": "UNVERIFIED", "liveness_score": 0.0,
+            "face_count": len(faces), "students": [],
+        }
+
+    students = []
+    for face in faces:
+        landmarks = get_face_landmarks(image_np, face)
+        embedding = compute_face_embedding(image_np, landmarks)
+        recognition = recognize_face(embedding, db)
+        decision = make_attendance_decision(AttendanceDecisionInput(
+            face_detection_status="ONE_FACE",
+            face_count=1,
+            liveness_status="PASS",
+            liveness_score=1.0,
+            recognition_result=recognition,
+            session_id=req.session_id,
+            db=db,
+        ))
+
+        if decision["decision"] in ("APPROVED", "MANUAL_REVIEW") and decision["student_id"]:
+            session = db.query(AttendanceSession).filter(
+                AttendanceSession.session_id == req.session_id
+            ).first()
+            attendance_date = session.date if session else datetime.now().strftime("%Y-%m-%d")
+            record = AttendanceRecord(
+                student_id=decision["student_id"],
+                subject_id=session.subject_id if session else 0,
+                session_id=req.session_id,
+                date=attendance_date,
+                timestamp=datetime.now(),
+                recognition_confidence=decision["recognition_confidence"],
+                liveness_score=1.0,
+                liveness_status="PASS",
+                status="PRESENT" if decision["decision"] == "APPROVED" else "MANUAL_REVIEW",
+                verification_method="GROUP_CAMERA_CHALLENGE",
+                review_status="APPROVED" if decision["decision"] == "APPROVED" else "PENDING",
+            )
+            db.add(record)
+            try:
+                db.commit()
+                db.refresh(record)
+                decision["attendance_id"] = record.attendance_id
+            except IntegrityError:
+                db.rollback()
+                decision.update({
+                    "decision": "DUPLICATE",
+                    "reason": "Attendance already marked for this session.",
+                    "attendance_id": None,
+                })
+
+        students.append(decision)
+
+    return {
+        "decision": "GROUP_PROCESSED",
+        "reason": f"Processed {len(students)} face(s).",
+        "liveness_status": "PASS",
+        "liveness_score": 1.0,
+        "face_count": len(students),
+        "students": students,
+    }
 
 
 def _get_session_subject_id(session_id: int, db: Session) -> int:

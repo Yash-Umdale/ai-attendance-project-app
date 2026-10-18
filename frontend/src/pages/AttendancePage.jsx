@@ -44,7 +44,6 @@ export default function AttendancePage() {
         <nav className="app-header__nav">
           <a href="/register" className="btn btn--ghost btn--sm">Register</a>
           <a href="/student/account" className="btn btn--ghost btn--sm">My Account</a>
-          <a href="/student/review" className="btn btn--ghost btn--sm">Review</a>
           <a href="/login" className="btn btn--ghost btn--sm">Admin Login</a>
         </nav>
       </header>
@@ -56,7 +55,7 @@ export default function AttendancePage() {
               AI Attendance
             </span>
           </h1>
-          <p className="text-muted mt-1">Position your face in the camera to mark attendance</p>
+          <p className="text-muted mt-1">Fit all students in the camera and follow the live check to mark attendance</p>
         </div>
 
         {/* Session Selector */}

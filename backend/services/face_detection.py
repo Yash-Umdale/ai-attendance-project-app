@@ -147,12 +147,18 @@ def get_face_landmarks(image_np: np.ndarray, face_rect) -> object:
     return sp(image_np, face_rect)
 
 
-def compute_face_embedding(image_np: np.ndarray, shape) -> np.ndarray:
+def compute_face_embedding(image_np: np.ndarray, shape, num_jitters: int = 10) -> np.ndarray:
     """
     Compute a 128-dimensional face embedding from an image and landmarks.
 
     This is the core biometric vector used for identity comparison.
     Uses dlib's ResNet-based face recognition model.
+
+    Higher num_jitters produces more stable embeddings by averaging over
+    multiple random perturbations of the face.  The default of 10 greatly
+    reduces misidentification between different people.  Enrollment should
+    use an even higher value (e.g. 50) because it only runs once per
+    student while recognition runs on every frame.
 
     Metric: Euclidean distance between embeddings.
     Same person: typically < 0.6
@@ -161,12 +167,15 @@ def compute_face_embedding(image_np: np.ndarray, shape) -> np.ndarray:
     Args:
         image_np: RGB image as numpy array
         shape: dlib shape (68-point landmarks)
+        num_jitters: Number of random re-samples of the face to average.
+            Higher = more accurate but slower.  Default 10 for recognition,
+            use 50+ for enrollment.
 
     Returns:
         numpy array of shape (128,)
     """
     fr = get_face_recognizer()
-    face_descriptor = fr.compute_face_descriptor(image_np, shape, 1)
+    face_descriptor = fr.compute_face_descriptor(image_np, shape, num_jitters)
     return np.array(face_descriptor)
 
 
@@ -191,7 +200,7 @@ def get_all_face_embeddings(image_np: np.ndarray) -> list:
 
     for face in faces:
         shape = sp(image_np, face)
-        descriptor = fr.compute_face_descriptor(image_np, shape, 1)
+        descriptor = fr.compute_face_descriptor(image_np, shape, 10)
         embeddings.append(np.array(descriptor))
 
     return embeddings

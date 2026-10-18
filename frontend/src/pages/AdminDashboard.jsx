@@ -3,14 +3,18 @@
  *
  * Dashboard with:
  * - Stats cards (total students, present today, absent, pending reviews)
- * - Attendance table with search/filter
- * - Session management
+ * - Attendance table with search/filter + manual edit
+ * - Session management with Start Attendance webcam
  * - Subject management
+ * - Student information
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { adminAPI, enrollmentAPI, sessionsAPI, studentsAPI } from '../api/client';
+import { adminAPI, enrollmentAPI, sessionsAPI, studentsAPI, attendanceAPI } from '../api/client';
+import Camera from '../components/Camera';
+import StatusDisplay from '../components/StatusDisplay';
+import { runLivenessChallenge } from '../utils/runLivenessChallenge';
 
 export default function AdminDashboard() {
   const navigate = useNavigate();
@@ -22,6 +26,9 @@ export default function AdminDashboard() {
   const [students, setStudents] = useState([]);
   const [subjectRosters, setSubjectRosters] = useState({});
   const [studentToEnroll, setStudentToEnroll] = useState({});
+  const [studentPasswordReset, setStudentPasswordReset] = useState({ studentId: null, password: '', confirmation: '' });
+  const [clearDataOpen, setClearDataOpen] = useState(false);
+  const [clearDataForm, setClearDataForm] = useState({ password: '', confirmation: '' });
   const [activeTab, setActiveTab] = useState('overview');
   const [loading, setLoading] = useState(true);
 
@@ -35,6 +42,15 @@ export default function AdminDashboard() {
   const [subjectForm, setSubjectForm] = useState({ subject_code: '', name: '', section: '' });
   const [formError, setFormError] = useState('');
   const [formSuccess, setFormSuccess] = useState('');
+
+  // Attendance webcam state
+  const [attendanceSessionId, setAttendanceSessionId] = useState(null);
+  const [cameraEnabled, setCameraEnabled] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [attendanceResult, setAttendanceResult] = useState(null);
+  const [attendanceStatus, setAttendanceStatus] = useState('');
+  const [recognizedList, setRecognizedList] = useState([]);
+  const cameraRef = useRef(null);
 
   useEffect(() => {
     const stored = localStorage.getItem('veriattend_teacher');
@@ -176,6 +192,113 @@ export default function AdminDashboard() {
     }
   };
 
+  const handleResetStudentPassword = async (event, student) => {
+    event.preventDefault();
+    setFormError(''); setFormSuccess('');
+    if (studentPasswordReset.password !== studentPasswordReset.confirmation) {
+      setFormError('The new password and confirmation do not match.');
+      return;
+    }
+    try {
+      await adminAPI.resetStudentPassword(student.student_id, studentPasswordReset.password);
+      setStudentPasswordReset({ studentId: null, password: '', confirmation: '' });
+      setFormSuccess(`Password updated for ${student.student_code}. Share it with the student securely.`);
+    } catch (err) {
+      setFormError(err.response?.data?.detail || 'Could not update the student password.');
+    }
+  };
+
+  const handleClearAllData = async (event) => {
+    event.preventDefault();
+    setFormError(''); setFormSuccess('');
+    try {
+      const response = await adminAPI.clearData(clearDataForm);
+      setClearDataOpen(false);
+      setClearDataForm({ password: '', confirmation: '' });
+      setStudentPasswordReset({ studentId: null, password: '', confirmation: '' });
+      setFormSuccess(response.data.message);
+      await loadData();
+    } catch (err) {
+      setFormError(err.response?.data?.detail || 'Could not clear application data.');
+    }
+  };
+
+  // ── Manual attendance status edit ──
+  const handleStatusChange = async (attendanceId, newStatus) => {
+    setFormError(''); setFormSuccess('');
+    try {
+      await adminAPI.updateAttendanceStatus(attendanceId, newStatus);
+      setFormSuccess(`Attendance updated to ${newStatus}.`);
+      // Refresh records
+      handleFilter();
+    } catch (err) {
+      setFormError(err.response?.data?.detail || 'Could not update status.');
+    }
+  };
+
+  // ── Start Attendance (webcam) ──
+  const startAttendanceCamera = (sessionId) => {
+    setAttendanceSessionId(sessionId);
+    setAttendanceResult(null);
+    setAttendanceStatus('');
+    setRecognizedList([]);
+    setCameraEnabled(true);
+  };
+
+  const stopAttendanceCamera = () => {
+    cameraRef.current?.stopCamera();
+    setCameraEnabled(false);
+    setAttendanceSessionId(null);
+    setAttendanceResult(null);
+    setAttendanceStatus('');
+  };
+
+  const captureAndVerify = async () => {
+    if (isProcessing || !cameraRef.current || !attendanceSessionId) return;
+    if (!cameraRef.current.captureFrame()) return;
+    setIsProcessing(true);
+    setAttendanceStatus('✨ Preparing a random liveness check...');
+    try {
+      const { challengeId, frameData } = await runLivenessChallenge(
+        cameraRef,
+        (instruction) => setAttendanceStatus(`✨ ${instruction}`),
+        true,
+      );
+      setAttendanceStatus('🔍 Liveness verified. Recognizing face...');
+      const response = await attendanceAPI.markGroup({
+        session_id: attendanceSessionId,
+        frame_data: frameData,
+        liveness_challenge_id: challengeId,
+      });
+      const decision = response.data;
+      setAttendanceResult(decision);
+      if (decision.decision === 'GROUP_PROCESSED') {
+        const approved = decision.students.filter((student) => student.decision === 'APPROVED');
+        const duplicates = decision.students.filter((student) => student.decision === 'DUPLICATE');
+        setAttendanceStatus(`✅ Processed ${decision.face_count} face(s): ${approved.length} marked present, ${duplicates.length} already present.`);
+        setRecognizedList((prev) => {
+          const added = approved
+            .filter((student) => !prev.some((row) => row.student_id === student.student_id))
+            .map((student) => ({
+              student_id: student.student_id,
+              student_name: student.student_name,
+              student_code: student.student_code,
+              confidence: student.recognition_confidence,
+            }));
+          return [...prev, ...added];
+        });
+      } else {
+        setAttendanceStatus(`❌ ${decision.reason || 'Group attendance rejected.'}`);
+      }
+    } catch (err) {
+      setAttendanceStatus(err.isLivenessFailure
+        ? '❌ Attendance rejected (Image Detected) — Liveness unverified'
+        : `⚠️ ${err.response?.data?.detail || err.message}`);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
   const handleLogout = () => {
     localStorage.removeItem('veriattend_token');
     localStorage.removeItem('veriattend_teacher');
@@ -202,7 +325,6 @@ export default function AdminDashboard() {
         </a>
         <nav className="app-header__nav">
           <span className="text-sm text-muted">👋 {teacher?.name}</span>
-          <a href="/reviews" className="btn btn--ghost btn--sm">📋 Reviews</a>
           <button className="btn btn--ghost btn--sm" onClick={handleLogout}>Logout</button>
         </nav>
       </header>
@@ -276,7 +398,7 @@ export default function AdminDashboard() {
           </div>
         )}
 
-        {/* Attendance Tab */}
+        {/* Attendance Tab — with manual edit */}
         {activeTab === 'attendance' && (
           <div className="animate-in">
             <h3 className="mb-2">Attendance Records</h3>
@@ -301,6 +423,7 @@ export default function AdminDashboard() {
                 <select className="input" value={filters.status_filter} onChange={(e) => setFilters({ ...filters, status_filter: e.target.value })}>
                   <option value="">All</option>
                   <option value="PRESENT">Present</option>
+                  <option value="ABSENT">Absent</option>
                   <option value="MANUAL_REVIEW">Manual Review</option>
                   <option value="REJECTED">Rejected</option>
                 </select>
@@ -313,19 +436,34 @@ export default function AdminDashboard() {
                 <table className="table">
                   <thead><tr>
                     <th>Student</th><th>Subject</th><th>Date</th><th>Time</th>
-                    <th>Confidence</th><th>Liveness</th><th>Status</th><th>Review</th>
+                    <th>Confidence</th><th>Liveness</th><th>Status</th><th>Action</th>
                   </tr></thead>
                   <tbody>
                     {records.map((r) => (
-                      <tr key={r.attendance_id}>
+                      <tr key={r.attendance_id ?? `absent-${r.session_id}-${r.student_id}`}>
                         <td><strong>{r.student_name}</strong><br /><span className="text-sm text-muted">{r.student_code}</span></td>
                         <td>{r.subject_name}</td>
                         <td>{r.date}</td>
                         <td>{new Date(r.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</td>
                         <td>{r.recognition_confidence ? `${(r.recognition_confidence * 100).toFixed(0)}%` : '—'}</td>
                         <td><span className={`badge ${r.liveness_status === 'PASS' ? 'badge--success' : 'badge--neutral'}`}>{r.liveness_status}</span></td>
-                        <td><span className={`badge ${r.status === 'PRESENT' ? 'badge--success' : r.status === 'MANUAL_REVIEW' ? 'badge--warning' : 'badge--error'}`}>{r.status}</span></td>
-                        <td><span className={`badge ${r.review_status === 'APPROVED' ? 'badge--success' : r.review_status === 'PENDING' ? 'badge--warning' : 'badge--neutral'}`}>{r.review_status}</span></td>
+                        <td><span className={`badge ${r.status === 'PRESENT' ? 'badge--success' : r.status === 'ABSENT' ? 'badge--error' : r.status === 'MANUAL_REVIEW' ? 'badge--warning' : 'badge--error'}`}>
+                          {r.is_derived_absence ? 'ABSENT · No attendance' : r.status}
+                        </span></td>
+                        <td>
+                          {r.is_derived_absence ? <span className="text-sm text-muted">No record</span> : (
+                            <div className="flex gap-1">
+                              {r.status !== 'PRESENT' && (
+                                <button className="btn btn--success btn--sm" onClick={() => handleStatusChange(r.attendance_id, 'PRESENT')}
+                                  title="Mark as Present">✅</button>
+                              )}
+                              {r.status !== 'ABSENT' && (
+                                <button className="btn btn--danger btn--sm" onClick={() => handleStatusChange(r.attendance_id, 'ABSENT')}
+                                  title="Mark as Absent">❌</button>
+                              )}
+                            </div>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -337,12 +475,62 @@ export default function AdminDashboard() {
           </div>
         )}
 
-        {/* Sessions Tab */}
+        {/* Sessions Tab — with Start Attendance */}
         {activeTab === 'sessions' && (
           <div className="animate-in">
             <div className="page-header">
               <h3>📅 Attendance Sessions</h3>
             </div>
+
+            {/* Webcam Attendance Area */}
+            {cameraEnabled && attendanceSessionId && (
+              <div className="card mb-3" style={{ border: '2px solid var(--primary-500)' }}>
+                <div className="flex gap-2 mb-2" style={{ alignItems: 'center', justifyContent: 'space-between' }}>
+                  <h4>📸 Live Attendance — Session #{attendanceSessionId}</h4>
+                  <button className="btn btn--danger btn--sm" onClick={stopAttendanceCamera}>⏹ Stop Camera</button>
+                </div>
+                <Camera ref={cameraRef} />
+                <div className="flex gap-2 mt-2" style={{ justifyContent: 'center' }}>
+                  <button className="btn btn--primary btn--lg" onClick={captureAndVerify} disabled={isProcessing}>
+                    {isProcessing ? '⏳ Processing...' : '📸 Capture & Verify'}
+                  </button>
+                </div>
+                {attendanceStatus && (
+                  <div className="alert mt-2" style={{
+                    background: attendanceStatus.startsWith('✅') ? 'rgba(34,197,94,0.15)' :
+                      attendanceStatus.startsWith('📌') ? 'rgba(245,158,11,0.15)' :
+                      'rgba(239,68,68,0.15)',
+                    border: '1px solid',
+                    borderColor: attendanceStatus.startsWith('✅') ? 'var(--success-500)' :
+                      attendanceStatus.startsWith('📌') ? 'var(--warning-500)' :
+                      'var(--error-500)',
+                    padding: '0.75rem 1rem', borderRadius: 8,
+                  }}>
+                    <strong>{attendanceStatus}</strong>
+                  </div>
+                )}
+                {recognizedList.length > 0 && (
+                  <div className="mt-2">
+                    <h4 className="mb-1">✅ Recognized Students ({recognizedList.length})</h4>
+                    <div className="table-container">
+                      <table className="table">
+                        <thead><tr><th>#</th><th>Roll Number</th><th>Name</th><th>Confidence</th></tr></thead>
+                        <tbody>
+                          {recognizedList.map((r, i) => (
+                            <tr key={r.student_id}>
+                              <td>{i + 1}</td>
+                              <td><strong>{r.student_code}</strong></td>
+                              <td>{r.student_name}</td>
+                              <td>{r.confidence ? `${(r.confidence * 100).toFixed(0)}%` : '—'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Create Session Form */}
             <div className="card mb-3">
@@ -397,10 +585,20 @@ export default function AdminDashboard() {
                         <td>{s.date}</td>
                         <td>{new Date(s.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} — {new Date(s.end_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</td>
                         <td><span className={`badge ${s.is_active ? 'badge--success' : 'badge--neutral'}`}>{s.is_active ? 'Active' : 'Inactive'}</span></td>
-                        <td><div className="flex gap-1"><button className={`btn btn--sm ${s.is_active ? 'btn--danger' : 'btn--success'}`}
-                          onClick={() => handleToggleSession(s.session_id, s.is_active)}>
-                          {s.is_active ? 'Deactivate' : 'Activate'}
-                        </button><button className="btn btn--danger btn--sm" onClick={() => handleDeleteSession(s.session_id, s.name)}>Delete</button></div></td>
+                        <td><div className="flex gap-1">
+                          {s.is_active && (
+                            <button className="btn btn--primary btn--sm"
+                              onClick={() => startAttendanceCamera(s.session_id)}
+                              disabled={cameraEnabled}>
+                              📸 Start Attendance
+                            </button>
+                          )}
+                          <button className={`btn btn--sm ${s.is_active ? 'btn--danger' : 'btn--success'}`}
+                            onClick={() => handleToggleSession(s.session_id, s.is_active)}>
+                            {s.is_active ? 'Deactivate' : 'Activate'}
+                          </button>
+                          <button className="btn btn--danger btn--sm" onClick={() => handleDeleteSession(s.session_id, s.name)}>Delete</button>
+                        </div></td>
                       </tr>
                     ))}
                   </tbody>
@@ -509,20 +707,43 @@ export default function AdminDashboard() {
         {activeTab === 'students' && (
           <div className="animate-in">
             <div className="page-header"><h3>👥 Student Information</h3></div>
-            <p className="text-muted mb-2">Administrator view. Passwords and face vectors are never displayed or recoverable.</p>
+            <p className="text-muted mb-2">Passwords are never displayed. An administrator can set a new password when a student cannot sign in.</p>
             {students.length > 0 ? (
               <div className="table-container">
                 <table className="table">
-                  <thead><tr><th>Student ID</th><th>Name</th><th>Email</th><th>Department / Year</th><th>Face enrollment</th><th>Account</th></tr></thead>
+                  <thead><tr><th>Student ID</th><th>Name</th><th>Mobile</th><th>Email</th><th>Department / Year</th><th>Face enrollment</th><th>Account</th><th>Password</th></tr></thead>
                   <tbody>
                     {students.map((student) => (
                       <tr key={student.student_id}>
                         <td><strong>{student.student_code}</strong></td>
                         <td>{student.name}</td>
+                        <td>{student.mobile_number || '—'}</td>
                         <td>{student.email || '—'}</td>
                         <td>{student.department || '—'}{student.year ? ` / ${student.year}` : ''}</td>
                         <td><span className={`badge ${student.has_face_embedding ? 'badge--success' : 'badge--neutral'}`}>{student.has_face_embedding ? 'Enrolled' : 'Not enrolled'}</span></td>
                         <td><span className={`badge ${student.is_active ? 'badge--success' : 'badge--error'}`}>{student.account_status}</span></td>
+                        <td>
+                          {student.is_active && studentPasswordReset.studentId === student.student_id ? (
+                            <form onSubmit={(event) => handleResetStudentPassword(event, student)} className="flex gap-1" style={{ alignItems: 'center', flexWrap: 'wrap' }}>
+                              <input className="input" type="password" required minLength="4" maxLength="100"
+                                aria-label={`New password for ${student.student_code}`} placeholder="New password"
+                                autoComplete="new-password" value={studentPasswordReset.password}
+                                onChange={(event) => setStudentPasswordReset((current) => ({ ...current, password: event.target.value }))} />
+                              <input className="input" type="password" required minLength="4" maxLength="100"
+                                aria-label={`Confirm new password for ${student.student_code}`} placeholder="Confirm password"
+                                autoComplete="new-password" value={studentPasswordReset.confirmation}
+                                onChange={(event) => setStudentPasswordReset((current) => ({ ...current, confirmation: event.target.value }))} />
+                              <button className="btn btn--primary btn--sm" type="submit">Save</button>
+                              <button className="btn btn--ghost btn--sm" type="button"
+                                onClick={() => setStudentPasswordReset({ studentId: null, password: '', confirmation: '' })}>Cancel</button>
+                            </form>
+                          ) : (
+                            <button className="btn btn--secondary btn--sm" disabled={!student.is_active}
+                              onClick={() => { setFormError(''); setFormSuccess(''); setStudentPasswordReset({ studentId: student.student_id, password: '', confirmation: '' }); }}>
+                              Reset password
+                            </button>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -531,6 +752,39 @@ export default function AdminDashboard() {
             ) : (
               <div className="empty-state"><div className="empty-state__icon">👥</div><div className="empty-state__title">No students registered yet</div></div>
             )}
+
+            <section className="card mt-3" style={{ border: '1px solid var(--error-500)' }}>
+              <h4 style={{ color: 'var(--error-500)' }}>Danger zone: Clear all data</h4>
+              <p className="text-sm text-muted mt-1">
+                Permanently deletes student profiles and face data, classes, enrollments, sessions, and attendance records.
+                Administrator accounts are kept so you can continue using the app.
+              </p>
+              {!clearDataOpen ? (
+                <button className="btn btn--danger mt-2" onClick={() => { setFormError(''); setFormSuccess(''); setClearDataOpen(true); }}>
+                  Clear all data
+                </button>
+              ) : (
+                <form onSubmit={handleClearAllData} className="mt-2" style={{ maxWidth: 520 }}>
+                  <div className="input-group mb-2">
+                    <label className="input-group__label" htmlFor="clear-data-admin-password">Administrator password</label>
+                    <input id="clear-data-admin-password" className="input" type="password" autoComplete="current-password"
+                      required value={clearDataForm.password}
+                      onChange={(event) => setClearDataForm((current) => ({ ...current, password: event.target.value }))} />
+                  </div>
+                  <div className="input-group mb-2">
+                    <label className="input-group__label" htmlFor="clear-data-confirmation">Type DELETE ALL DATA to confirm</label>
+                    <input id="clear-data-confirmation" className="input" type="text" required autoComplete="off"
+                      value={clearDataForm.confirmation}
+                      onChange={(event) => setClearDataForm((current) => ({ ...current, confirmation: event.target.value }))} />
+                  </div>
+                  <div className="flex gap-1">
+                    <button className="btn btn--danger" type="submit">Confirm clear all data</button>
+                    <button className="btn btn--secondary" type="button"
+                      onClick={() => { setClearDataOpen(false); setClearDataForm({ password: '', confirmation: '' }); }}>Cancel</button>
+                  </div>
+                </form>
+              )}
+            </section>
           </div>
         )}
       </main>

@@ -1,24 +1,6 @@
-streamlit
-# Utilitites 
-numpy
-pandas
+# AI Attendance System — Dependencies
+# Install backend dependencies from the backend/ directory:
+#   cd backend && pip install -r requirements.txt
 
-# FACE RECOGNITION
-scikit-learn
-dlib-bin
-git+https://github.com/ageitgey/face_recognition_models
-setuptools<70.0.0
-
-
-supabase
-bcrypt
-
-
-
-segno
-pillow
-
-
-
-librosa
-resemblyzer
+# This file re-exports backend requirements for convenience:
+-r backend/requirements.txt

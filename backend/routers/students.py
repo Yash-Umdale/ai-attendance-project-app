@@ -12,8 +12,6 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 import numpy as np
-import base64
-import cv2
 import logging
 import re
 
@@ -38,25 +36,16 @@ def _student_response(student: Student) -> StudentResponse:
     active = bool(student.is_active)
     return StudentResponse(
         student_id=student.student_id, student_code=student.student_code,
-        name=student.name, email=student.email, department=student.department,
+        name=student.name, email=student.email,
+        mobile_number=getattr(student, 'mobile_number', None),
+        department=student.department,
         year=student.year, has_face_embedding=student.face_embedding is not None,
         is_active=active, account_status="Active" if active else "Deregistered",
         created_at=student.created_at,
     )
 
 
-def _decode_frame(frame_data: str) -> np.ndarray:
-    """Decode a base64-encoded image to numpy RGB array."""
-    # Handle data URI prefix
-    if "," in frame_data:
-        frame_data = frame_data.split(",", 1)[1]
-
-    img_bytes = base64.b64decode(frame_data)
-    nparr = np.frombuffer(img_bytes, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    if img is None:
-        raise ValueError("Failed to decode image")
-    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+from utils import decode_frame as _decode_frame
 
 
 @router.post(
@@ -92,6 +81,7 @@ def register_student(req: StudentRegisterRequest, db: Session = Depends(get_db))
         student_code=student_code,
         name=req.name.strip(),
         email=email,
+        mobile_number=req.mobile_number.strip() if req.mobile_number and req.mobile_number.strip() else None,
         department=req.department.strip() if req.department and req.department.strip() else None,
         year=req.year.strip() if req.year and req.year.strip() else None,
         password_hash=hash_password(req.password) if req.password else None,
@@ -179,6 +169,106 @@ def get_my_monthly_attendance(
     return results
 
 
+@router.get(
+    "/me/attendance-summary",
+    summary="Get attendance statistics for the current student",
+)
+def get_my_attendance_summary(
+    student: Student = Depends(get_current_student),
+    db: Session = Depends(get_db),
+):
+    """Return overall and per-subject attendance percentages for the dashboard."""
+    from models.database import AttendanceSession
+
+    # All attendance records for this student
+    all_records = (
+        db.query(AttendanceRecord)
+        .filter(AttendanceRecord.student_id == student.student_id)
+        .all()
+    )
+
+    # Total sessions the student could have attended (subjects they are enrolled in)
+    enrolled_subject_ids = [
+        row.subject_id
+        for row in db.query(SubjectStudent)
+        .filter(SubjectStudent.student_id == student.student_id)
+        .all()
+    ]
+
+    # Per-subject stats
+    subject_stats = []
+    total_sessions_count = 0
+    total_present_count = 0
+
+    for sub_id in enrolled_subject_ids:
+        subject = db.query(Subject).filter(Subject.subject_id == sub_id).first()
+        if not subject:
+            continue
+        # Count total unique sessions for this subject
+        sessions_count = (
+            db.query(AttendanceSession)
+            .filter(
+                AttendanceSession.subject_id == sub_id,
+                AttendanceSession.is_deleted.is_(False),
+            )
+            .count()
+        )
+        present_count = (
+            db.query(AttendanceRecord)
+            .filter(
+                AttendanceRecord.student_id == student.student_id,
+                AttendanceRecord.subject_id == sub_id,
+                AttendanceRecord.status == "PRESENT",
+            )
+            .count()
+        )
+        percentage = round((present_count / sessions_count * 100), 1) if sessions_count > 0 else 0.0
+        subject_stats.append({
+            "subject_id": sub_id,
+            "subject_name": subject.name,
+            "subject_code": subject.subject_code,
+            "section": subject.section,
+            "total_sessions": sessions_count,
+            "present_count": present_count,
+            "absent_count": sessions_count - present_count,
+            "percentage": percentage,
+        })
+        total_sessions_count += sessions_count
+        total_present_count += present_count
+
+    overall_percentage = round((total_present_count / total_sessions_count * 100), 1) if total_sessions_count > 0 else 0.0
+
+    # Recent attendance history (last 50)
+    recent = (
+        db.query(AttendanceRecord)
+        .filter(AttendanceRecord.student_id == student.student_id)
+        .order_by(AttendanceRecord.timestamp.desc())
+        .limit(50)
+        .all()
+    )
+    history = []
+    for r in recent:
+        subj = db.query(Subject).filter(Subject.subject_id == r.subject_id).first()
+        history.append({
+            "date": r.date,
+            "subject_name": subj.name if subj else "Unknown",
+            "status": r.status,
+            "confidence": r.recognition_confidence,
+            "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+        })
+
+    return {
+        "student_name": student.name,
+        "student_code": student.student_code,
+        "overall_percentage": overall_percentage,
+        "total_sessions": total_sessions_count,
+        "total_present": total_present_count,
+        "total_absent": total_sessions_count - total_present_count,
+        "subjects": subject_stats,
+        "history": history,
+    }
+
+
 @router.delete("/me", response_model=SuccessResponse, summary="Deregister the current student account")
 def deregister_my_account(
     req: DeregisterStudentRequest,
@@ -193,7 +283,6 @@ def deregister_my_account(
     # Delete only active associations/biometrics. Attendance and review FKs stay intact.
     db.query(SubjectStudent).filter(SubjectStudent.student_id == student.student_id).delete()
     student.face_embedding = None
-    student.voice_embedding = None
     student.is_active = False
     from datetime import datetime
     student.deregistered_at = datetime.utcnow()
@@ -303,7 +392,6 @@ def remove_student_face(
 
     db.delete(enrollment)
     student.face_embedding = None
-    student.voice_embedding = None
     db.commit()
     invalidate_classifier_cache()
     logger.info("Teacher %s removed face data for student %s", teacher.teacher_id, student_id)
@@ -363,9 +451,12 @@ def enroll_face(student_id: int, req: EnrollFaceRequest, db: Session = Depends(g
         raise HTTPException(status_code=400, detail="Image quality too low. Please try again.")
 
     # Get landmarks and compute embedding
+    # Use high num_jitters (100) for enrollment — this is a one-time operation
+    # per student and produces a much more stable/accurate reference embedding
+    # that reduces misidentification during attendance.
     face_rect = detection["faces"][0]
     landmarks = get_face_landmarks(image_np, face_rect)
-    embedding = compute_face_embedding(image_np, landmarks)
+    embedding = compute_face_embedding(image_np, landmarks, num_jitters=100)
 
     # Store embedding (as list of floats)
     student.face_embedding = embedding.tolist()

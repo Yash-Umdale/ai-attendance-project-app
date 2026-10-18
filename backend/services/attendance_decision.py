@@ -57,8 +57,7 @@ def make_attendance_decision(input_data: AttendanceDecisionInput) -> dict:
         3. Check recognition → reject if not recognized (UNKNOWN)
         4. Check confidence:
             - HIGH (≥ high_threshold) → APPROVED (auto-mark)
-            - BORDERLINE (≥ borderline_threshold) → MANUAL_REVIEW
-            - LOW (< borderline_threshold) → REJECTED
+            - LOWER (< high_threshold) → MANUAL_REVIEW
         5. Check duplicate → reject if already marked in this session
         6. Check session active → reject if session expired
 
@@ -166,7 +165,6 @@ def make_attendance_decision(input_data: AttendanceDecisionInput) -> dict:
 
     # ── Step 6: Confidence-Based Decision ──
     high_threshold = settings.CONFIDENCE_HIGH_THRESHOLD
-    borderline_threshold = settings.CONFIDENCE_BORDERLINE_THRESHOLD
 
     if confidence >= high_threshold:
         result["decision"] = "APPROVED"
@@ -175,20 +173,13 @@ def make_attendance_decision(input_data: AttendanceDecisionInput) -> dict:
             f"APPROVED: student_id={student_id}, confidence={confidence:.4f}"
         )
 
-    elif confidence >= borderline_threshold:
+    else:
         result["decision"] = "MANUAL_REVIEW"
         result["reason"] = (
-            f"Borderline confidence ({confidence:.0%}). Sent to manual review."
+            f"Low recognition confidence ({confidence:.0%}). Sent to manual review."
         )
         logger.info(
-            f"MANUAL_REVIEW: student_id={student_id}, confidence={confidence:.4f}"
-        )
-
-    else:
-        result["decision"] = "REJECTED"
-        result["reason"] = f"Low confidence recognition ({confidence:.0%}). Rejected."
-        logger.info(
-            f"REJECTED (low confidence): student_id={student_id}, confidence={confidence:.4f}"
+            f"MANUAL_REVIEW (low confidence): student_id={student_id}, confidence={confidence:.4f}"
         )
 
     return result

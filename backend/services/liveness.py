@@ -97,7 +97,7 @@ def check_passive_liveness(image_np: np.ndarray) -> dict:
 # Challenge-Based Liveness
 # ══════════════════════════════════════
 
-def create_challenge() -> dict:
+def create_challenge(group_mode: bool = False) -> dict:
     """
     Generate a random liveness challenge for the user.
 
@@ -105,6 +105,11 @@ def create_challenge() -> dict:
         dict with challenge_id, challenge_type, instruction, timeout_seconds
     """
     import random
+
+    now = time.time()
+    for expired_id, existing in list(_active_challenges.items()):
+        if now - existing["created_at"] > existing["timeout_seconds"]:
+            del _active_challenges[expired_id]
 
     challenge_type = random.choice(CHALLENGE_TYPES)
     challenge_id = str(uuid.uuid4())
@@ -114,16 +119,25 @@ def create_challenge() -> dict:
         "TURN_LEFT": "Please turn your head slightly to the left",
         "TURN_RIGHT": "Please turn your head slightly to the right",
     }
+    instruction = instructions[challenge_type]
+    if group_mode:
+        instruction = f"Everyone: {instruction.lower()}"
 
     challenge = {
         "challenge_id": challenge_id,
         "challenge_type": challenge_type,
-        "instruction": instructions[challenge_type],
+        "instruction": instruction,
         "timeout_seconds": settings.LIVENESS_CHALLENGE_TIMEOUT,
         "created_at": time.time(),
         "frames": [],  # Will store frame analysis results
         "completed": False,
         "result": None,
+        "state": "START",
+        "closed_frames": 0,
+        "open_frames": 0,
+        "group_mode": group_mode,
+        "group_face_count": None,
+        "group_states": [],
     }
 
     _active_challenges[challenge_id] = challenge
@@ -131,7 +145,7 @@ def create_challenge() -> dict:
     return {
         "challenge_id": challenge_id,
         "challenge_type": challenge_type,
-        "instruction": instructions[challenge_type],
+        "instruction": instruction,
         "timeout_seconds": settings.LIVENESS_CHALLENGE_TIMEOUT,
     }
 
@@ -228,6 +242,9 @@ def verify_challenge_frame(challenge_id: str, image_np: np.ndarray) -> dict:
 
     challenge = _active_challenges[challenge_id]
 
+    if challenge["completed"]:
+        return challenge["result"]
+
     # Check timeout
     elapsed = time.time() - challenge["created_at"]
     if elapsed > challenge["timeout_seconds"]:
@@ -241,6 +258,9 @@ def verify_challenge_frame(challenge_id: str, image_np: np.ndarray) -> dict:
 
     # Detect face
     detection = detect_faces(image_np)
+    if challenge.get("group_mode"):
+        return _verify_group_frame(challenge, detection, image_np)
+
     if detection["status"] != "ONE_FACE":
         return {
             "liveness": "UNCERTAIN",
@@ -262,6 +282,71 @@ def verify_challenge_frame(challenge_id: str, image_np: np.ndarray) -> dict:
     return {"liveness": "FAIL", "score": 0.0, "message": "Unknown challenge type."}
 
 
+def _new_face_challenge_state() -> dict:
+    return {
+        "frames": [], "completed": False, "result": None,
+        "state": "START", "closed_frames": 0, "open_frames": 0,
+    }
+
+
+def _verify_group_frame(challenge: dict, detection: dict, image_np: np.ndarray) -> dict:
+    """Require every visible face to complete the same random live action."""
+    faces = detection.get("faces", [])
+    if not faces:
+        return {
+            "liveness": "UNCERTAIN", "score": 0.0,
+            "challenge": challenge["challenge_type"],
+            "message": "Keep all students' faces visible in the camera.",
+        }
+
+    if len(faces) > 8:
+        return {
+            "liveness": "FAIL", "score": 0.0,
+            "challenge": challenge["challenge_type"],
+            "message": "Group attendance supports up to 8 faces at a time.",
+        }
+
+    # Keep participant slots stable by ordering faces from left to right.
+    faces = sorted(faces, key=lambda face: (face.left() + face.right()) / 2)
+    if challenge["group_face_count"] != len(faces):
+        challenge["group_face_count"] = len(faces)
+        challenge["group_states"] = [_new_face_challenge_state() for _ in faces]
+        return {
+            "liveness": "UNCERTAIN", "score": 0.0,
+            "challenge": challenge["challenge_type"],
+            "message": f"Keep all {len(faces)} faces visible. Everyone: follow the instruction.",
+        }
+
+    challenge_type = challenge["challenge_type"]
+    for face, state in zip(faces, challenge["group_states"]):
+        if state["completed"]:
+            continue
+        landmarks = get_face_landmarks(image_np, face)
+        if challenge_type == "BLINK":
+            _verify_blink(state, landmarks)
+        else:
+            _verify_head_turn(state, landmarks, challenge_type)
+
+    completed_count = sum(1 for state in challenge["group_states"] if state["completed"])
+    if completed_count == len(faces):
+        result = {
+            "liveness": "PASS", "score": 1.0,
+            "challenge": challenge_type,
+            "face_count": len(faces),
+            "message": f"All {len(faces)} students completed the liveness check.",
+        }
+        challenge["completed"] = True
+        challenge["verified_face_count"] = len(faces)
+        challenge["result"] = result
+        return result
+
+    return {
+        "liveness": "UNCERTAIN", "score": 0.0,
+        "challenge": challenge_type,
+        "message": f"{completed_count} of {len(faces)} students verified. Everyone: follow the instruction.",
+    }
+
+
 def _verify_blink(challenge: dict, landmarks) -> dict:
     """Verify blink challenge using Eye Aspect Ratio."""
     # dlib 68-point landmark indices for eyes
@@ -273,17 +358,23 @@ def _verify_blink(challenge: dict, landmarks) -> dict:
     avg_ear = (left_ear + right_ear) / 2.0
 
     threshold = settings.LIVENESS_EAR_THRESHOLD
-    frames = challenge["frames"]
-    frames.append(avg_ear)
+    challenge["frames"].append(avg_ear)
+    if challenge["state"] == "START":
+        if avg_ear >= threshold:
+            challenge["state"] = "OPEN"
+    elif challenge["state"] == "OPEN":
+        if avg_ear < threshold:
+            challenge["closed_frames"] += 1
+            if challenge["closed_frames"] >= settings.LIVENESS_BLINK_CONSEC_FRAMES:
+                challenge["state"] = "CLOSED"
+        else:
+            challenge["closed_frames"] = 0
+    elif challenge["state"] == "CLOSED" and avg_ear >= threshold:
+        challenge["open_frames"] += 1
 
-    # Count transitions: open → closed → open
-    closed_count = sum(1 for ear in frames if ear < threshold)
-    open_count = sum(1 for ear in frames if ear >= threshold)
-
-    # Need at least one closed and then open sequence
-    if closed_count >= settings.LIVENESS_BLINK_CONSEC_FRAMES and open_count >= 2:
+    if challenge["state"] == "CLOSED" and challenge["open_frames"] >= 2:
         challenge["completed"] = True
-        score = min(1.0, closed_count / settings.LIVENESS_BLINK_CONSEC_FRAMES * 0.7 + 0.3)
+        score = 1.0
         result = {
             "liveness": "PASS",
             "score": round(score, 3),
@@ -291,15 +382,13 @@ def _verify_blink(challenge: dict, landmarks) -> dict:
             "message": "Blink detected. Liveness verified.",
         }
         challenge["result"] = result
-        # Clean up
-        del _active_challenges[challenge["challenge_id"]]
         return result
 
     return {
         "liveness": "UNCERTAIN",
         "score": 0.0,
         "challenge": "BLINK",
-        "message": f"Waiting for blink... ({len(frames)} frames analyzed)",
+        "message": f"Waiting for blink... ({len(challenge['frames'])} frames analyzed)",
     }
 
 
@@ -311,9 +400,22 @@ def _verify_head_turn(challenge: dict, landmarks, direction: str) -> dict:
     frames = challenge["frames"]
     frames.append(yaw)
 
-    if direction == "TURN_LEFT" and yaw < -threshold:
+    if challenge["state"] == "START":
+        if abs(yaw) <= threshold * 0.5:
+            challenge["state"] = "NEUTRAL"
+            challenge["baseline_yaw"] = yaw
+        return {
+            "liveness": "UNCERTAIN",
+            "score": 0.0,
+            "challenge": direction,
+            "message": "Face forward briefly, then follow the head-turn instruction.",
+        }
+
+    movement = yaw - challenge.get("baseline_yaw", 0.0)
+
+    if direction == "TURN_LEFT" and movement < -threshold:
         challenge["completed"] = True
-        score = min(1.0, abs(yaw) / (threshold * 2) + 0.3)
+        score = min(1.0, abs(movement) / (threshold * 2) + 0.3)
         result = {
             "liveness": "PASS",
             "score": round(score, 3),
@@ -321,12 +423,11 @@ def _verify_head_turn(challenge: dict, landmarks, direction: str) -> dict:
             "message": f"Head turn {direction.split('_')[1].lower()} detected. Liveness verified.",
         }
         challenge["result"] = result
-        del _active_challenges[challenge["challenge_id"]]
         return result
 
-    elif direction == "TURN_RIGHT" and yaw > threshold:
+    elif direction == "TURN_RIGHT" and movement > threshold:
         challenge["completed"] = True
-        score = min(1.0, abs(yaw) / (threshold * 2) + 0.3)
+        score = min(1.0, abs(movement) / (threshold * 2) + 0.3)
         result = {
             "liveness": "PASS",
             "score": round(score, 3),
@@ -334,7 +435,6 @@ def _verify_head_turn(challenge: dict, landmarks, direction: str) -> dict:
             "message": f"Head turn {direction.split('_')[1].lower()} detected. Liveness verified.",
         }
         challenge["result"] = result
-        del _active_challenges[challenge["challenge_id"]]
         return result
 
     return {
@@ -343,6 +443,20 @@ def _verify_head_turn(challenge: dict, landmarks, direction: str) -> dict:
         "challenge": direction,
         "message": f"Please turn your head {direction.split('_')[1].lower()}... (yaw: {yaw:.1f}°)",
     }
+
+
+def consume_successful_challenge(challenge_id: str | None, expected_face_count: int | None = None) -> bool:
+    """Consume a completed, unexpired challenge exactly once for attendance."""
+    if not challenge_id:
+        return False
+    challenge = _active_challenges.pop(challenge_id, None)
+    if not challenge or not challenge.get("completed"):
+        return False
+    if time.time() - challenge["created_at"] > challenge["timeout_seconds"]:
+        return False
+    if expected_face_count is not None and challenge.get("verified_face_count") != expected_face_count:
+        return False
+    return True
 
 
 def get_combined_liveness(image_np: np.ndarray, challenge_result: dict | None = None) -> dict:

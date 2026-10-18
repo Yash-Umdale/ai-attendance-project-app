@@ -82,22 +82,18 @@ app.add_middleware(
 from routers.auth import router as auth_router
 from routers.students import router as students_router
 from routers.enrollment import router as enrollment_router
-from routers.recognition import router as recognition_router
-from routers.liveness import router as liveness_router
 from routers.attendance import router as attendance_router
 from routers.sessions import router as sessions_router
-from routers.reviews import router as reviews_router
 from routers.admin import router as admin_router
+from routers.liveness import router as liveness_router
 
 app.include_router(auth_router)
 app.include_router(students_router)
 app.include_router(enrollment_router)
-app.include_router(recognition_router)
-app.include_router(liveness_router)
 app.include_router(attendance_router)
 app.include_router(sessions_router)
-app.include_router(reviews_router)
 app.include_router(admin_router)
+app.include_router(liveness_router)
 
 
 # ── Health Check ──

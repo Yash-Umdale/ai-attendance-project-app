@@ -21,7 +21,7 @@ export default function StudentRegister() {
 
   const [step, setStep] = useState(1); // 1: form, 2: camera
   const [form, setForm] = useState({
-    student_code: '', name: '', email: '', department: '', year: '', password: '', confirmPassword: '',
+    student_code: '', name: '', email: '', mobile_number: '', department: '', year: '', password: '', confirmPassword: '',
   });
   const [studentId, setStudentId] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -115,6 +115,11 @@ export default function StudentRegister() {
                 <input className="input" type="email" placeholder="yash@example.com"
                   value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} id="input-student-email" />
               </div>
+              <div className="input-group mb-2">
+                <label className="input-group__label">Mobile Number *</label>
+                <input className="input" type="tel" placeholder="9876543210" required
+                  value={form.mobile_number} onChange={(e) => setForm({ ...form, mobile_number: e.target.value })} id="input-student-mobile" />
+              </div>
               <div className="grid-2 mb-2">
                 <div className="input-group">
                   <label className="input-group__label">Department</label>
@@ -171,7 +176,7 @@ export default function StudentRegister() {
                 <button className="btn btn--primary" onClick={() => navigate('/attendance')}>
                   Go to Attendance →
                 </button>
-                <button className="btn btn--secondary" onClick={() => { setStep(1); setForm({ student_code: '', name: '', email: '', department: '', year: '', password: '', confirmPassword: '' }); setSuccess(''); }}>
+                <button className="btn btn--secondary" onClick={() => { setStep(1); setForm({ student_code: '', name: '', email: '', mobile_number: '', department: '', year: '', password: '', confirmPassword: '' }); setSuccess(''); }}>
                   Register Another
                 </button>
               </div>

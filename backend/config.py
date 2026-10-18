@@ -42,26 +42,28 @@ class Settings(BaseSettings):
     # Lower = stricter matching. dlib 128D embeddings typically use 0.6.
     RECOGNITION_THRESHOLD: float = 0.6
 
-    # Confidence ranges for attendance decisions.
+    # Confidence threshold for attendance decisions.
     # Confidence is calculated as: 1.0 - (distance / RECOGNITION_THRESHOLD)
-    # HIGH: auto-approve attendance
-    # BORDERLINE: send to manual review
-    # LOW: reject
-    # 75% is the auto-approval floor used by the student attendance flow.
+    # At or above 40%, attendance is auto-approved; lower recognized matches
+    # are sent to manual review rather than rejected.
     # Scores are still calculated from the actual face-embedding distance;
     # this setting never increases or fabricates a recognition score.
-    CONFIDENCE_HIGH_THRESHOLD: float = 0.75
-    CONFIDENCE_BORDERLINE_THRESHOLD: float = 0.55
+    CONFIDENCE_HIGH_THRESHOLD: float = 0.40
+    # Retained so older .env files continue to load; low recognized matches
+    # are all sent to manual review, so this secondary threshold is unused.
+    CONFIDENCE_BORDERLINE_THRESHOLD: float = 0.40
 
     # ── Liveness Verification ──
     # Eye Aspect Ratio threshold for blink detection
     LIVENESS_EAR_THRESHOLD: float = 0.21
     # Minimum consecutive frames with closed eyes to count as blink
-    LIVENESS_BLINK_CONSEC_FRAMES: int = 2
+    # One closed-eye sample is sufficient because the challenge also requires
+    # open eyes before and after closure across separate live camera frames.
+    LIVENESS_BLINK_CONSEC_FRAMES: int = 1
     # Head pose yaw angle threshold (degrees) for turn detection
     LIVENESS_HEAD_TURN_THRESHOLD: float = 15.0
     # Liveness challenge timeout in seconds
-    LIVENESS_CHALLENGE_TIMEOUT: int = 15
+    LIVENESS_CHALLENGE_TIMEOUT: int = 30
     # Minimum texture variance (Laplacian) to detect printed photos
     LIVENESS_TEXTURE_THRESHOLD: float = 50.0
 

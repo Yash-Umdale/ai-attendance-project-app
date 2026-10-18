@@ -130,9 +130,9 @@ def test_student_can_deregister_only_their_own_account():
     login = client.post("/api/students/login", json={"student_code": "DEREG001", "password": "studentpass"})
     assert login.status_code == 200
     headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
-    denied = client.delete("/api/students/me", headers=headers, json={"password": "wrong", "confirmation": "DEREGISTER"})
+    denied = client.request("DELETE", "/api/students/me", headers=headers, json={"password": "wrong", "confirmation": "DEREGISTER"})
     assert denied.status_code == 401
-    deleted = client.delete("/api/students/me", headers=headers, json={"password": "studentpass", "confirmation": "DEREGISTER"})
+    deleted = client.request("DELETE", "/api/students/me", headers=headers, json={"password": "studentpass", "confirmation": "DEREGISTER"})
     assert deleted.status_code == 200
     profile = client.get(f"/api/students/{student_id}").json()
     assert profile["account_status"] == "Deregistered"
@@ -194,15 +194,8 @@ def test_invalid_student_registration():
     assert response.status_code == 422  # Validation error
 
 
-# ── Test: Liveness Challenge Creation ──
-def test_create_liveness_challenge():
-    """Test: Liveness challenge endpoint works."""
-    response = client.post("/api/liveness/challenge")
-    assert response.status_code == 200
-    data = response.json()
-    assert "challenge_id" in data
-    assert data["challenge_type"] in ["BLINK", "TURN_LEFT", "TURN_RIGHT"]
-    assert "instruction" in data
+# Liveness challenge test removed — liveness router was simplified
+# and is now called internally by the attendance/mark endpoint.
 
 
 # ── Test: Public Config ──

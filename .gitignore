@@ -5,3 +5,7 @@ __pycache__/
 .env
 *.pyc
 dist/
+*.db
+*.sqlite
+*.sqlite3
+archive/

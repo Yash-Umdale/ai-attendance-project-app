@@ -18,7 +18,8 @@ const api = axios.create({
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('veriattend_token');
   // A student account request supplies its own scoped token.
-  if (token && !config.headers.Authorization) {
+  const isStudentLogin = config.url?.includes('/students/login');
+  if (token && !config.headers.Authorization && !isStudentLogin) {
     config.headers.Authorization = `Bearer ${token}`;
   }
   return config;
@@ -32,7 +33,8 @@ api.interceptors.response.use(
       // Only clear and redirect if a token was actually sent (meaning it's invalid/expired)
       // Don't redirect if we're on login page or if the request was the login request itself
       const isLoginPage = window.location.pathname.includes('/login');
-      const isLoginRequest = error.config?.url?.includes('/auth/login');
+      const requestUrl = error.config?.url || '';
+      const isLoginRequest = requestUrl.includes('/auth/login') || requestUrl.includes('/students/login');
       const isRegisterRequest = error.config?.url?.includes('/auth/register');
 
       if (!isLoginPage && !isLoginRequest && !isRegisterRequest) {
@@ -69,6 +71,7 @@ export const studentsAPI = {
   me: (config = {}) => api.get('/students/me', config),
   monthlyAttendance: (month, config = {}) =>
     api.get('/students/me/attendance', { ...config, params: { month } }),
+  attendanceSummary: (config = {}) => api.get('/students/me/attendance-summary', config),
   deregister: (data, config = {}) => api.delete('/students/me', { ...config, data }),
 };
 
@@ -88,7 +91,7 @@ export const recognitionAPI = {
 
 // ── Liveness ──
 export const livenessAPI = {
-  createChallenge: () => api.post('/liveness/challenge'),
+  createChallenge: (groupMode = false) => api.post('/liveness/challenge', { group_mode: groupMode }),
   verify: (challengeId, frameData) =>
     api.post('/liveness/verify', { challenge_id: challengeId, frame_data: frameData }),
   passiveCheck: (frameData) =>
@@ -98,6 +101,7 @@ export const livenessAPI = {
 // ── Attendance ──
 export const attendanceAPI = {
   mark: (data) => api.post('/attendance/mark', data),
+  markGroup: (data) => api.post('/attendance/mark-group', data),
   getRecords: (params) => api.get('/attendance/records', { params }),
   getStudentRecords: (studentId) => api.get(`/attendance/student/${studentId}`),
 };
@@ -112,12 +116,6 @@ export const sessionsAPI = {
   remove: (id) => api.delete(`/sessions/${id}`),
 };
 
-// ── Reviews ──
-export const reviewsAPI = {
-  list: (status) => api.get('/reviews', { params: status ? { status_filter: status } : {} }),
-  decide: (id, decision, notes) =>
-    api.post(`/reviews/${id}/decide`, { decision, notes }),
-};
 
 // ── Admin ──
 export const adminAPI = {
@@ -125,7 +123,12 @@ export const adminAPI = {
   createSubject: (data) => api.post('/admin/subjects', data),
   listSubjects: () => api.get('/admin/subjects'),
   listStudents: () => api.get('/admin/students'),
+  resetStudentPassword: (studentId, password) =>
+    api.put(`/admin/students/${studentId}/password`, { password }),
+  clearData: (data) => api.delete('/admin/data', { data }),
   getAttendance: (params) => api.get('/admin/attendance', { params }),
+  updateAttendanceStatus: (attendanceId, newStatus) =>
+    api.put(`/admin/attendance/${attendanceId}/status`, null, { params: { new_status: newStatus } }),
 };
 
 // ── Config ──

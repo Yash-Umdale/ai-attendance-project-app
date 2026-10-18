@@ -41,11 +41,6 @@ class AttendanceStatus(str, enum.Enum):
     REJECTED = "REJECTED"
 
 
-class ReviewStatus(str, enum.Enum):
-    """Status of a manual review."""
-    PENDING = "PENDING"
-    APPROVED = "APPROVED"
-    REJECTED = "REJECTED"
 
 
 class VerificationMethod(str, enum.Enum):
@@ -87,6 +82,7 @@ class Student(Base):
     student_code = Column(String(50), unique=True, nullable=False, index=True)
     name = Column(String(200), nullable=False)
     email = Column(String(200), unique=True, nullable=True)
+    mobile_number = Column(String(20), nullable=True)
     department = Column(String(200), nullable=True)
     year = Column(String(50), nullable=True)
     # Student credentials and account lifecycle.  Attendance rows deliberately
@@ -98,8 +94,6 @@ class Student(Base):
     # Face embedding stored as JSON array of 128 floats
     face_embedding = Column(JSON, nullable=True)
 
-    # Optional voice embedding (preserved from existing project)
-    voice_embedding = Column(JSON, nullable=True)
 
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
@@ -107,7 +101,6 @@ class Student(Base):
     # Relationships
     enrollments = relationship("SubjectStudent", back_populates="student")
     attendance_records = relationship("AttendanceRecord", back_populates="student")
-    reviews = relationship("ManualReview", back_populates="student")
 
 
 class Subject(Base):
@@ -211,37 +204,6 @@ class AttendanceRecord(Base):
     session = relationship("AttendanceSession", back_populates="attendance_records")
 
 
-class ManualReview(Base):
-    """
-    Manual review queue for borderline-confidence recognition results.
-
-    When recognition confidence falls in the borderline range,
-    the attendance is flagged for admin review.
-    """
-    __tablename__ = "manual_reviews"
-
-    review_id = Column(Integer, primary_key=True, autoincrement=True)
-    attendance_id = Column(Integer, ForeignKey("attendance_records.attendance_id"), nullable=False)
-    student_id = Column(Integer, ForeignKey("students.student_id"), nullable=False)
-    session_id = Column(Integer, ForeignKey("attendance_sessions.session_id"), nullable=True)
-
-    recognition_confidence = Column(Float, nullable=False)
-    liveness_status = Column(String(20), nullable=False)
-    liveness_score = Column(Float, nullable=True)
-
-    # Review decision
-    status = Column(String(20), default="PENDING")  # PENDING, APPROVED, REJECTED
-    reviewed_by = Column(Integer, ForeignKey("teachers.teacher_id"), nullable=True)
-    reviewed_at = Column(DateTime, nullable=True)
-    review_notes = Column(Text, nullable=True)
-
-    created_at = Column(DateTime, default=func.now())
-
-    # Relationships
-    attendance = relationship("AttendanceRecord")
-    student = relationship("Student", back_populates="reviews")
-    reviewer = relationship("Teacher")
-
 
 # ── Database Initialization ──
 
@@ -256,6 +218,7 @@ def init_db():
         "password_hash": "VARCHAR(255)",
         "is_active": "BOOLEAN NOT NULL DEFAULT 1",
         "deregistered_at": "DATETIME",
+        "mobile_number": "VARCHAR(20)",
     }
     with engine.begin() as connection:
         for name, definition in additions.items():

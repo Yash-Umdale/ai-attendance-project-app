@@ -121,10 +121,12 @@ This is a Final Year Project developed at Walchand Institute of Technology, Sola
 | 🧠 **Face Recognition** | 128D embedding comparison with confidence scores |
 | ✨ **Liveness Verification** | Passive (texture) + Challenge-based (blink, head turn) |
 | 📊 **Confidence-Based Routing** | Auto-approve / Manual review / Reject |
-| 📋 **Manual Review Queue** | Admin approves/rejects borderline cases |
+| 📋 **Manual Review** | Admin reviews identified faces below the confidence threshold |
 | 📅 **Attendance Sessions** | Time-bounded sessions with activate/deactivate |
 | 🔒 **Duplicate Prevention** | Same student can't mark twice per session |
-| 👨‍🏫 **Admin Dashboard** | Stats, attendance tables, search/filter |
+| 👨‍🏫 **Admin Dashboard** | Stats, attendance tables, search/filter, student password resets |
+| 🗓️ **Absent Student Reporting** | Lists enrolled students with no attendance attempt after a session ends |
+| 🧹 **Clear Application Data** | Password and typed-phrase protected removal of student/class/attendance data |
 | 🔐 **JWT Authentication** | Secure teacher login with token-based auth |
 
 ---
@@ -151,9 +153,9 @@ Student → Open Camera → WebRTC → Capture Frame
                                        │ confidence
                         ┌──────────────┼──────────────┐
                         │              │              │
-                   ≥ 80%          55-79%          < 55%
-                   AUTO            MANUAL          REJECT
-                  APPROVE          REVIEW
+                   ≥ 40%         < 40% with match     No match or
+                   AUTO              MANUAL          liveness failure
+                  APPROVE            REVIEW              REJECT
 ```
 
 ---
@@ -202,8 +204,8 @@ npm install
 ```
 
 > The React/FastAPI application is the supported VeriAttend interface. The
-> top-level `app.py` and `src/` folder are an older Streamlit prototype kept
-> for reference; do not run both interfaces against the same database.
+> older Streamlit prototype has been removed from this repository; do not run
+> different application interfaces against the same database.
 
 ---
 
@@ -216,8 +218,8 @@ All configuration is in `backend/.env`:
 | `DATABASE_URL` | `sqlite:///./veriattend.db` | Database connection string |
 | `JWT_SECRET_KEY` | (dev default) | JWT signing secret — **change in production** |
 | `RECOGNITION_THRESHOLD` | `0.6` | Euclidean distance threshold for face matching |
-| `CONFIDENCE_HIGH_THRESHOLD` | `0.80` | Auto-approve above this confidence |
-| `CONFIDENCE_BORDERLINE_THRESHOLD` | `0.55` | Manual review above this, reject below |
+| `CONFIDENCE_HIGH_THRESHOLD` | `0.40` | Auto-approve identified matches at or above 40%; lower identified matches go to manual review |
+| `CONFIDENCE_BORDERLINE_THRESHOLD` | `0.40` | Legacy compatibility setting; the decision engine no longer uses a second confidence band |
 | `LIVENESS_EAR_THRESHOLD` | `0.21` | Eye Aspect Ratio threshold for blink detection |
 | `LIVENESS_CHALLENGE_TIMEOUT` | `15` | Seconds before a liveness challenge expires |
 | `CAMERA_SAMPLE_INTERVAL_MS` | `1500` | Milliseconds between frame captures |
@@ -275,9 +277,18 @@ App available at: `http://localhost:5173`
 4. Backend runs the **full pipeline**:
    - Face Detection → Liveness Check → Face Recognition → Decision Engine
 5. Result displayed to student:
-   - ✅ **Approved** — auto-marked present (high confidence)
-   - 📋 **Manual Review** — sent to admin queue (borderline)
-   - ❌ **Rejected** — low confidence or liveness failure
+   - ✅ **Approved** — identified match at or above 40%, auto-marked present
+   - 📋 **Manual Review** — identified match below 40%, saved as pending for an administrator
+   - ❌ **Rejected / Unknown** — liveness failure or no student identity could be matched
+
+### Reporting absent students
+
+In the admin dashboard's **Attendance** tab, choose a subject and date, set **Status** to **Absent**, and select **Filter**. For each completed session, the report compares the enrolled roster with attendance attempts and shows enrolled students who have no attendance record as **ABSENT · No attendance**. A session is considered complete after its scheduled end time. These derived rows are calculated for the report and are not written to the attendance database. A student with a recorded attendance attempt, including one pending manual review, is not treated as absent.
+
+### Student account recovery and data clearing
+
+- An administrator can set a new student password from the **Students** tab. The student enters the new password on the Student Portal sign-in page; the existing password is never displayed.
+- The **Clear all data** action in the **Students** tab requires the administrator's password and the exact phrase `DELETE ALL DATA`. It permanently deletes student profiles and face data, enrollments, subjects/classes, sessions, and attendance records. Administrator accounts are retained so the dashboard remains accessible.
 
 ---
 
@@ -324,16 +335,12 @@ Two complementary approaches:
 
 | Confidence Range | Decision | Action |
 |-----------------|----------|--------|
-| ≥ 80% | `APPROVED` | Auto-marked present |
-| 55% – 79% | `MANUAL_REVIEW` | Queued for admin review |
-| < 55% | `REJECTED` | Attendance denied |
+| ≥ 40%, identified match | `APPROVED` | Auto-marked present |
+| < 40%, identified match | `MANUAL_REVIEW` | Saved pending an administrator decision |
+| Identity not matched | `UNKNOWN` | No attendance record is created |
+| Liveness failure | `REJECTED` | Attendance denied |
 
-Thresholds are **configurable** via environment variables.
-
-Admin review interface (`/reviews`):
-- View student candidate, confidence, liveness result, timestamp
-- **Approve** or **Reject** with optional notes
-- Every decision is recorded with reviewer ID and timestamp
+The auto-approval threshold is configurable with `CONFIDENCE_HIGH_THRESHOLD`. The `CONFIDENCE_BORDERLINE_THRESHOLD` setting remains in older environment files for compatibility but is no longer used by the decision engine. Administrators can review pending rows in the dashboard's **Attendance** tab and change their status to Present or Absent.
 
 ---
 
@@ -358,9 +365,10 @@ Full interactive API docs are auto-generated by FastAPI:
 | POST | `/api/liveness/verify` | Verify liveness frame |
 | POST | `/api/attendance/mark` | Full attendance pipeline |
 | POST | `/api/sessions` | Create session |
-| GET | `/api/reviews` | List review queue |
-| POST | `/api/reviews/{id}/decide` | Approve/reject review |
 | GET | `/api/admin/dashboard` | Dashboard stats |
+| GET | `/api/admin/attendance` | Attendance report; derives absences for completed sessions when filtering by Absent |
+| PUT | `/api/admin/students/{id}/password` | Set a student's password (teacher/admin authentication required) |
+| DELETE | `/api/admin/data` | Clear operational data (password and phrase confirmation required) |
 
 ---
 
@@ -390,8 +398,8 @@ Tests cover:
 - ✅ Recognition (success, unknown)
 - ✅ Liveness (pass, fail)
 - ✅ High-confidence auto-approve
-- ✅ Borderline manual review
-- ✅ Low-confidence rejection
+- ✅ Low-confidence manual review for identified matches
+- ✅ Unknown-face and liveness-failure handling
 - ✅ Duplicate attendance prevention
 - ✅ Session validation
 - ✅ Invalid API requests (422, 401, 404)

@@ -16,7 +16,8 @@
 import { useState, useRef, useCallback } from 'react';
 import Camera from './Camera';
 import StatusDisplay from './StatusDisplay';
-import { attendanceAPI, livenessAPI } from '../api/client';
+import { attendanceAPI } from '../api/client';
+import { runLivenessChallenge } from '../utils/runLivenessChallenge';
 
 const FLOW_STATES = {
   IDLE: 'IDLE',
@@ -27,12 +28,14 @@ const FLOW_STATES = {
   ATTENDANCE_SUCCESS: 'ATTENDANCE_SUCCESS',
   MANUAL_REVIEW: 'MANUAL_REVIEW',
   REJECTED: 'REJECTED',
+  SPOOF_REJECTED: 'SPOOF_REJECTED',
+  GROUP_RESULT: 'GROUP_RESULT',
   DUPLICATE: 'DUPLICATE',
   ERROR: 'ERROR',
 };
 
 const STATUS_CONFIG = {
-  IDLE: { text: 'Position your face inside the frame', icon: '👤', type: 'idle' },
+  IDLE: { text: 'Fit each student inside the frame', icon: '👥', type: 'idle' },
   DETECTING_FACE: { text: 'Detecting face...', icon: '🔍', type: 'processing' },
   VERIFYING_LIVENESS: { text: 'Verifying liveness...', icon: '✨', type: 'processing' },
   RECOGNIZING: { text: 'Recognizing face...', icon: '🧠', type: 'processing' },
@@ -40,6 +43,8 @@ const STATUS_CONFIG = {
   ATTENDANCE_SUCCESS: { text: 'Attendance marked successfully!', icon: '✅', type: 'success' },
   MANUAL_REVIEW: { text: 'Sent to manual review', icon: '📋', type: 'warning' },
   REJECTED: { text: 'Attendance rejected', icon: '❌', type: 'error' },
+  SPOOF_REJECTED: { text: 'Attendance rejected (Image Detected)', icon: '❌', type: 'error' },
+  GROUP_RESULT: { text: 'Attendance is processed', icon: '✅', type: 'success' },
   DUPLICATE: { text: 'Already marked present', icon: '📌', type: 'warning' },
   ERROR: { text: 'An error occurred', icon: '⚠️', type: 'error' },
 };
@@ -51,37 +56,43 @@ export default function AttendanceFlow({ sessionId, onComplete }) {
   const [errorMessage, setErrorMessage] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [cameraEnabled, setCameraEnabled] = useState(false);
+  const [challengeInstruction, setChallengeInstruction] = useState('');
 
   const processFrame = useCallback(async () => {
     if (isProcessing || !cameraRef.current || !sessionId) return;
 
-    const frame = cameraRef.current.captureFrame();
-    if (!frame) return;
+    if (!cameraRef.current.captureFrame()) return;
 
     setIsProcessing(true);
 
     try {
-      // Step 1: Detection + Liveness + Recognition + Decision (all in one backend call)
-      setFlowState(FLOW_STATES.DETECTING_FACE);
-      await new Promise((r) => setTimeout(r, 300)); // Brief visual feedback
-
       setFlowState(FLOW_STATES.VERIFYING_LIVENESS);
-      await new Promise((r) => setTimeout(r, 300));
+      setChallengeInstruction('Preparing a random liveness check...');
+      const { challengeId, frameData } = await runLivenessChallenge(
+        cameraRef,
+        setChallengeInstruction,
+        true,
+      );
 
+      setFlowState(FLOW_STATES.DETECTING_FACE);
+      await new Promise((r) => setTimeout(r, 200));
       setFlowState(FLOW_STATES.RECOGNIZING);
       await new Promise((r) => setTimeout(r, 300));
 
       setFlowState(FLOW_STATES.CHECKING_ATTENDANCE);
 
-      const response = await attendanceAPI.mark({
+      const response = await attendanceAPI.markGroup({
         session_id: sessionId,
-        frame_data: frame,
+        frame_data: frameData,
+        liveness_challenge_id: challengeId,
       });
 
       const decision = response.data;
       setResult(decision);
 
-      switch (decision.decision) {
+      if (decision.decision === 'GROUP_PROCESSED') {
+        setFlowState(FLOW_STATES.GROUP_RESULT);
+      } else switch (decision.decision) {
         case 'APPROVED':
           setFlowState(FLOW_STATES.ATTENDANCE_SUCCESS);
           break;
@@ -101,10 +112,23 @@ export default function AttendanceFlow({ sessionId, onComplete }) {
 
       if (onComplete) onComplete(decision);
     } catch (err) {
-      setFlowState(FLOW_STATES.ERROR);
-      setErrorMessage(err.response?.data?.detail || err.message || 'Unknown error');
+      if (err.isLivenessFailure) {
+        setResult({
+          decision: 'REJECTED',
+          reason: 'No live blink or head movement was verified. An image or replay may be present.',
+          liveness_status: 'UNVERIFIED',
+          liveness_score: 0,
+          recognition_confidence: 0,
+        });
+        setFlowState(FLOW_STATES.SPOOF_REJECTED);
+        setErrorMessage('');
+      } else {
+        setFlowState(FLOW_STATES.ERROR);
+        setErrorMessage(err.response?.data?.detail || err.message || 'Unknown error');
+      }
     } finally {
       setIsProcessing(false);
+      setChallengeInstruction('');
       // Release the webcam as soon as this attempt is complete. The Camera
       // component unmounts and stops its MediaStream tracks.
       cameraRef.current?.stopCamera();
@@ -132,11 +156,13 @@ export default function AttendanceFlow({ sessionId, onComplete }) {
   };
 
   const statusConfig = STATUS_CONFIG[flowState] || STATUS_CONFIG.IDLE;
-  const isTerminal = ['ATTENDANCE_SUCCESS', 'MANUAL_REVIEW', 'REJECTED', 'DUPLICATE', 'ERROR'].includes(flowState);
+  const isTerminal = ['ATTENDANCE_SUCCESS', 'MANUAL_REVIEW', 'REJECTED', 'SPOOF_REJECTED', 'GROUP_RESULT', 'DUPLICATE', 'ERROR'].includes(flowState);
 
   const cameraStatusClass = flowState === 'ATTENDANCE_SUCCESS'
     ? 'camera-container--success'
-    : ['REJECTED', 'ERROR'].includes(flowState)
+    : flowState === 'GROUP_RESULT'
+      ? 'camera-container--success'
+    : ['REJECTED', 'SPOOF_REJECTED', 'ERROR'].includes(flowState)
       ? 'camera-container--error'
       : '';
 
@@ -151,7 +177,7 @@ export default function AttendanceFlow({ sessionId, onComplete }) {
         <div className="card text-center" style={{ padding: '2rem' }}>
           <div style={{ fontSize: '2.5rem' }}>📷</div>
           <h3 className="mt-1">Camera is off</h3>
-          <p className="text-muted text-sm mt-1">Start it only when a student is ready to mark attendance.</p>
+          <p className="text-muted text-sm mt-1">Start it when the students are ready to mark attendance together.</p>
         </div>
       )}
 
@@ -161,7 +187,8 @@ export default function AttendanceFlow({ sessionId, onComplete }) {
           icon={statusConfig.icon}
           text={statusConfig.text}
           type={statusConfig.type}
-          subtext={errorMessage && flowState === 'ERROR' ? errorMessage : undefined}
+          subtext={flowState === FLOW_STATES.VERIFYING_LIVENESS ? challengeInstruction :
+            errorMessage && flowState === 'ERROR' ? errorMessage : undefined}
         />
       </div>
 
@@ -187,7 +214,8 @@ export default function AttendanceFlow({ sessionId, onComplete }) {
               <div className="attendance-result__detail-label">Liveness</div>
               <div className="attendance-result__detail-value">
                 {result.liveness_status === 'PASS' ? '✅ Verified' :
-                  result.liveness_status === 'FAIL' ? '❌ Failed' : '⚠️ ' + result.liveness_status}
+                  result.liveness_status === 'UNVERIFIED' ? '⚠️ Unverified' :
+                    result.liveness_status === 'FAIL' ? '❌ Failed' : '⚠️ ' + result.liveness_status}
               </div>
             </div>
             <div className="attendance-result__detail">
@@ -200,6 +228,20 @@ export default function AttendanceFlow({ sessionId, onComplete }) {
 
           {result.reason && (
             <p className="text-sm text-muted mt-2">{result.reason}</p>
+          )}
+          {result.students?.length > 0 && (
+            <div className="mt-2" aria-label="Group attendance results">
+              {result.students.map((student, index) => (
+                <div key={`${student.student_id ?? 'unknown'}-${index}`} className="attendance-result__detail">
+                  <div className="attendance-result__detail-label">
+                    {student.student_name || 'Unknown face'}{student.student_code ? ` (${student.student_code})` : ''}
+                  </div>
+                  <div className="attendance-result__detail-value">
+                    {student.decision}{student.reason ? ` — ${student.reason}` : ''}
+                  </div>
+                </div>
+              ))}
+            </div>
           )}
         </div>
       )}

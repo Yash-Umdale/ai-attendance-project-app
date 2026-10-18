@@ -45,6 +45,7 @@ class StudentRegisterRequest(BaseModel):
     student_code: str = Field(..., min_length=1, max_length=50, description="Unique Student ID")
     name: str = Field(..., min_length=1, max_length=200, description="Full name")
     email: Optional[str] = Field(None, max_length=200, description="Email address")
+    mobile_number: Optional[str] = Field(None, max_length=20, description="Mobile number")
     department: Optional[str] = Field(None, max_length=200, description="Department")
     year: Optional[str] = Field(None, max_length=50, description="Class/year info")
     # Optional only to retain compatibility with profiles created before
@@ -56,6 +57,7 @@ class StudentResponse(BaseModel):
     student_code: str
     name: str
     email: Optional[str] = None
+    mobile_number: Optional[str] = None
     department: Optional[str] = None
     year: Optional[str] = None
     has_face_embedding: bool = False
@@ -74,6 +76,13 @@ class StudentUpdateRequest(BaseModel):
 class StudentLoginRequest(BaseModel):
     student_code: str
     password: str
+
+class AdminStudentPasswordResetRequest(BaseModel):
+    password: str = Field(..., min_length=4, max_length=100, description="New student password")
+
+class AdminClearDataRequest(BaseModel):
+    password: str = Field(..., min_length=1, max_length=100, description="Administrator password")
+    confirmation: str = Field(..., description="Must be DELETE ALL DATA")
 
 class StudentTokenResponse(BaseModel):
     access_token: str
@@ -222,7 +231,7 @@ class SessionToggleRequest(BaseModel):
 # ══════════════════════════════════════
 
 class AttendanceRecordResponse(BaseModel):
-    attendance_id: int
+    attendance_id: Optional[int] = None
     student_id: int
     student_code: Optional[str] = None
     student_name: Optional[str] = None
@@ -237,6 +246,7 @@ class AttendanceRecordResponse(BaseModel):
     status: str
     verification_method: str
     review_status: str = "PENDING"
+    is_derived_absence: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 
