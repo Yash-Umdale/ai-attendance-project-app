@@ -422,6 +422,24 @@ Tests cover:
 
 ---
 
+## 🚀 Free Deployment (Render + Supabase)
+
+The repository includes a Render Blueprint (`render.yaml`) for the React frontend and FastAPI backend. Use Supabase for PostgreSQL so attendance records and student data are not stored on Render's temporary filesystem.
+
+1. Create a free Supabase project and copy its PostgreSQL connection string from **Project Settings → Database**. Use the direct connection string if your hosting region supports IPv6; otherwise use Supabase's session pooler connection string. Keep the password private.
+2. Push this repository to GitHub.
+3. In Render, choose **New → Blueprint**, connect the repository, and select the branch to deploy. Render reads `render.yaml` and creates the frontend and backend services.
+4. When Render asks for `DATABASE_URL`, paste the Supabase connection string. Use the SQLAlchemy form `postgresql://...` and add `?sslmode=require` (or `&sslmode=require` if the URL already has query parameters).
+5. Wait for both deploys to finish, then open the `veriattend-web` URL. The Blueprint connects the Vite frontend to the API and configures CORS automatically.
+
+The free Render API sleeps after 15 minutes without requests and can take about a minute to wake up. Render's local filesystem is temporary, so do not deploy with the default SQLite database if you need student or attendance data to survive restarts. Supabase's free project can pause after a week of low activity and has a 500 MB database quota; resume it in Supabase if that happens. Free plans are suitable for a demo, not a reliability or backup guarantee.
+
+### Using it on a phone
+
+Yes. Open the deployed **HTTPS frontend URL** in the phone's browser and allow camera access when prompted. Camera capture in browsers requires a secure context such as HTTPS and user permission. The mobile browser sends camera frames to the backend for recognition, so a slow or sleeping free backend can delay attendance. Use the frontend URL rather than `localhost`, which on a phone refers to the phone itself.
+
+---
+
 ## 👥 Team
 
 | Name | Role |

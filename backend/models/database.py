@@ -88,7 +88,7 @@ class Student(Base):
     # Student credentials and account lifecycle.  Attendance rows deliberately
     # remain related to this profile after it is deactivated.
     password_hash = Column(String(255), nullable=True)
-    is_active = Column(Boolean, nullable=False, default=True, server_default="1")
+    is_active = Column(Boolean, nullable=False, default=True, server_default="true")
     deregistered_at = Column(DateTime, nullable=True)
 
     # Face embedding stored as JSON array of 128 floats
@@ -150,7 +150,7 @@ class AttendanceSession(Base):
     start_time = Column(DateTime, nullable=False)
     end_time = Column(DateTime, nullable=False)
     is_active = Column(Boolean, default=True)
-    is_deleted = Column(Boolean, nullable=False, default=False, server_default="0")
+    is_deleted = Column(Boolean, nullable=False, default=False, server_default="false")
     deleted_at = Column(DateTime, nullable=True)
     created_by = Column(Integer, ForeignKey("teachers.teacher_id"), nullable=False)
     created_at = Column(DateTime, default=func.now())
@@ -208,7 +208,7 @@ class AttendanceRecord(Base):
 # ── Database Initialization ──
 
 def init_db():
-    """Create tables and apply the small backwards-compatible SQLite migration."""
+    """Create tables and apply small backwards-compatible additive migrations."""
     Base.metadata.create_all(bind=engine)
     # This project does not use Alembic yet.  Existing copied databases need
     # these additive columns; no attendance data is altered by this migration.
@@ -216,21 +216,21 @@ def init_db():
     columns = {column["name"] for column in inspector.get_columns("students")}
     additions = {
         "password_hash": "VARCHAR(255)",
-        "is_active": "BOOLEAN NOT NULL DEFAULT 1",
-        "deregistered_at": "DATETIME",
+        "is_active": "BOOLEAN NOT NULL DEFAULT TRUE",
+        "deregistered_at": "TIMESTAMP",
         "mobile_number": "VARCHAR(20)",
     }
     with engine.begin() as connection:
         for name, definition in additions.items():
             if name not in columns:
                 connection.execute(text(f"ALTER TABLE students ADD COLUMN {name} {definition}"))
-        connection.execute(text("UPDATE students SET is_active = 1 WHERE is_active IS NULL"))
+        connection.execute(text("UPDATE students SET is_active = TRUE WHERE is_active IS NULL"))
     session_columns = {column["name"] for column in inspector.get_columns("attendance_sessions")}
     with engine.begin() as connection:
         if "is_deleted" not in session_columns:
-            connection.execute(text("ALTER TABLE attendance_sessions ADD COLUMN is_deleted BOOLEAN NOT NULL DEFAULT 0"))
+            connection.execute(text("ALTER TABLE attendance_sessions ADD COLUMN is_deleted BOOLEAN NOT NULL DEFAULT FALSE"))
         if "deleted_at" not in session_columns:
-            connection.execute(text("ALTER TABLE attendance_sessions ADD COLUMN deleted_at DATETIME"))
+            connection.execute(text("ALTER TABLE attendance_sessions ADD COLUMN deleted_at TIMESTAMP"))
 
 
 def get_db():

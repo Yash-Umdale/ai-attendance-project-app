@@ -6,7 +6,6 @@ via environment variables (loaded from .env file).
 """
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import List
 import os
 
 
@@ -35,7 +34,9 @@ class Settings(BaseSettings):
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 480  # 8 hours
 
     # ── CORS ──
-    CORS_ORIGINS: List[str] = ["http://localhost:5173", "http://localhost:3000"]
+    # Comma-separated origins allow hosting platforms to provide the frontend
+    # URL without needing to construct a JSON array in an environment variable.
+    CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
 
     # ── Face Recognition ──
     # Euclidean distance threshold for face recognition.

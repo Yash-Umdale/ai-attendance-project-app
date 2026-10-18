@@ -7,7 +7,9 @@
 
 import axios from 'axios';
 
-const API_BASE = '/api';
+// In development Vite proxies /api to the local FastAPI server. In production,
+// VITE_API_URL points to the separately hosted backend (for example, Render).
+const API_BASE = `${import.meta.env.VITE_API_URL || ''}/api`;
 
 const api = axios.create({
   baseURL: API_BASE,
